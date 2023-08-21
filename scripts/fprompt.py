@@ -1,8 +1,6 @@
 import modules.scripts as scripts
 import gradio as gr
 
-import scripts.prompt_formating as f
-
 from modules.processing import (
     process_images,
     Processed,
