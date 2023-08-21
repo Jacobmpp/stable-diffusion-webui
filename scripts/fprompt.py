@@ -301,10 +301,8 @@ def main(
     )
 
     unformated_prompts = (
-        p.prompt.strip(", ") + " ### " + p.negative_prompt.strip(", ") + " "
+        '"' + p.prompt.strip(", ") + " ### " + p.negative_prompt.strip(", ") + '" 🔴'
     )
-
-    p.extra_generation_params["\n\nUnformated Prompts"] = unformated_prompts
 
     fix_seed(p)
     original_seed = p.seed
@@ -331,6 +329,18 @@ def main(
 
             p.prompt = positive_prompts[i]
             p.negative_prompt = negative_prompts[i]
+
+            p.extra_generation_params = {
+                "🔴 Unformated Prompts": (unformated_prompts),
+                "Total Frames": len(positive_prompts),
+                "Frame": i + 1,
+                "DCop": ((range_start) if len(positive_prompts)<2 else (range_start + (i / (frame_count - 1)) * (range_end - range_start))),
+                "DCoP Range Start": range_start,
+                "DCop Range End": range_end,
+                "Remove Zero Weighted LORAs": "✔️" if remove_empty_loras else "❌",
+                "Remove Zero Weighted Attributes": "✔️" if remove_empty_attrs else "❌",
+            }
+
             proc = process_images(p)
 
             if state.interrupted:
