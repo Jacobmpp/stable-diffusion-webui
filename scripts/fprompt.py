@@ -337,6 +337,7 @@ def main(
                 "DCop Range End": range_end,
                 "Remove Zero Weighted LORAs": "✔️" if remove_empty_loras else "❌",
                 "Remove Zero Weighted Attributes": "✔️" if remove_empty_attrs else "❌",
+                "Loopback": "✔️" if loopback else "❌",
             }
 
             proc = process_images(p)
