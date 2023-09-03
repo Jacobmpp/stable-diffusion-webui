@@ -5,12 +5,15 @@ from modules.processing import (
     process_images,
     Processed,
     fix_seed,
+    StableDiffusionProcessing,
     StableDiffusionProcessingImg2Img,
 )
 from modules.shared import opts, cmd_opts, state
 
 import re
 
+def curve(i, a=0):
+    return (1-a)*((2-i)*i)**.5 + a*i
 
 def evalInParens(str):
     out = ""
@@ -26,7 +29,7 @@ def applyFunctionToGroup(callable):
 
 def evalIfEvalable(string):
     try:
-        return simplify(eval(string[1:-1]))
+        return simplify(eval(string[1:-1].replace("<", "(").replace(">", ")")))
     except Exception:
         return string
 
@@ -37,7 +40,7 @@ def cycle(val, cycles):
 
 
 def simplify(num):
-    if abs(num - round(num)) < 0.00001:
+    if abs(num - round(num)) < 0.001:
         num = round(num)
     num_str = str(num)
     idx_99999 = num_str.find("99999")
@@ -67,7 +70,7 @@ def stringToCurrentState(str, partial):
 
 def listToCurrentState(partial, first, last, start=0, stop=1, cycles=0.5):
     if start == stop:
-        raise ValueError("Start and stop values cannot be the same")
+        return first if partial < start else last
     if start > stop:
         first, last = last, first
         start, stop = stop, start
@@ -271,6 +274,42 @@ def build_prompts(
     return prompts[: int(frame_count)]
 
 
+def extractParam(
+    originalVal, prompt: str, paramName: str, normalizingFunction=lambda x: x
+):
+    parts = (" " + prompt).split(f" {paramName}:")
+    if len(parts) == 1:
+        return originalVal, prompt
+    if len(parts) == 2:
+        valueString = re.match(r" ?[0-9.]+", parts[1])[0]
+        outValue = normalizingFunction(valueString)
+        outPrompt = parts[0] + (
+            parts[1][len(valueString) :] if parts[1] != valueString else ""
+        )
+        return outValue, outPrompt.strip()
+
+    raise ValueError("Duplicate parameter definition of '%s' in prompt." % paramName)
+
+
+def extractAndApplyTextDefinedParams(p: StableDiffusionProcessing, img2img: bool):
+    normalize64 = lambda x: round(float(x) / 64) * 64
+
+    p.cfg_scale, p.prompt = extractParam(p.cfg_scale, p.prompt, "cfg", float)
+    p.width, p.prompt = extractParam(p.width, p.prompt, "width", normalize64)
+    p.width, p.prompt = extractParam(p.width, p.prompt, "w", normalize64)
+    p.height, p.prompt = extractParam(p.height, p.prompt, "height", normalize64)
+    p.height, p.prompt = extractParam(p.height, p.prompt, "h", normalize64)
+    p.steps, p.prompt = extractParam(p.steps, p.prompt, "steps", int)
+    p.seed, p.prompt = extractParam(p.seed, p.prompt, "seed", int)
+    p.subseed = p.seed
+
+    if img2img:
+        p.denoising_strength, p.prompt = extractParam(p.denoising_strength, p.prompt, "ds", float)
+        p.denoising_strength, p.prompt = extractParam(p.denoising_strength, p.prompt, "denoising_strength", float)
+
+    return p
+
+
 def main(
     p: StableDiffusionProcessingImg2Img,
     frame_count,
@@ -281,6 +320,7 @@ def main(
     remove_empty_attrs,
     loopback,
 ):
+    img2img = hasattr(p, "init_images")
     positive_prompts = build_prompts(
         p.prompt.strip(", "),
         frame_count,
@@ -298,9 +338,8 @@ def main(
         remove_empty_attrs,
     )
 
-    unformated_prompts = (
-        '"' + p.prompt.strip(", ") + " ### " + p.negative_prompt.strip(", ") + '" 🔴'
-    )
+    unformated_prompt = p.prompt.strip(", ")
+    unformated_negative_prompt = p.negative_prompt.strip(", ")
 
     fix_seed(p)
     original_seed = p.seed
@@ -328,13 +367,23 @@ def main(
             p.prompt = positive_prompts[i]
             p.negative_prompt = negative_prompts[i]
 
+            p = extractAndApplyTextDefinedParams(p, img2img)
+
             p.extra_generation_params = {
-                "🔴 Unformated Prompts": (unformated_prompts),
-                "Total Frames": len(positive_prompts),
-                "Frame": i + 1,
-                "DCop": ((range_start) if len(positive_prompts)<2 else (range_start + (i / (frame_count - 1)) * (range_end - range_start))),
-                "DCoP Range Start": range_start,
-                "DCop Range End": range_end,
+                "🟢 Unformated Prompt": (unformated_prompt),
+                "🔴 Unformated Negative Prompt": (unformated_negative_prompt),
+                "🟠 DCoP": (
+                    (range_start)
+                    if len(positive_prompts) < 2
+                    else (
+                        range_start
+                        + (i / (frame_count - 1)) * (range_end - range_start)
+                    )
+                ),
+                "🟡🟢 DCoP Range Start": range_start,
+                "🟡🔴 DCoP Range End": range_end,
+                "🔵 Frame": i + 1,
+                "🟣 Total Frames": len(positive_prompts),
                 "Remove Zero Weighted LORAs": "✔️" if remove_empty_loras else "❌",
                 "Remove Zero Weighted Attributes": "✔️" if remove_empty_attrs else "❌",
                 "Loopback": "✔️" if loopback else "❌",
@@ -368,9 +417,7 @@ class Script(scripts.Script):
             range_end = gr.Number(label="Range End", value=1)
         with gr.Row():
             remove_empty_loras = gr.Checkbox(label="Remove Zero Weighted LORAs", value=True)
-            remove_empty_attrs = gr.Checkbox(
-                label="Remove Zero Weighted Attributes", value=False
-            )
+            remove_empty_attrs = gr.Checkbox(label="Remove Zero Weighted Attributes", value=False)
             loopback = gr.Checkbox(
                 label="Loopback Output", value=False, visible=is_img2img
             )
@@ -387,8 +434,16 @@ class Script(scripts.Script):
                 a smoothly transitioning lerp between ";" seperated token sets with a default value of \<A\> and a peak value of \<B\>
                 
                 If the contents of a pair of parentheses can become a number when evaluated, resulting number will replace that string.
-                This is the very last step, so {} constructs can be inside and will be evaluated properly
+                This is the very last step, so {} constructs can be inside and will be evaluated properly.
+                Since it is done recursively, you must replace internal () with <>. This allows you to use python builtins like round and int.
+                
+                I also created the function curve(x, a) that takes an x value from 0 to 1 and optionally a flattening percentage (a):
+                it actually returns (1-a)\*sin(arccos(x))+a\*x, which in simple terms is a curve that jumps up then grows more slowly.
+                The flattening percentage is basically how much it is squished to a linear growth. 0-> quarter circle, 1 -> straight line
 
+                Additionally, several configuration options can be specified in the text and dynamically changed.
+                Simply put the name of the configuration option then : then the number or expression.
+                Supported configurations: cfg, seed, steps, width(w), height(h), denoising_strength(ds, only works in Img2Img)
 
                 ### Examples
                  - {0,1} smoothly goes from 0 to 1
@@ -399,8 +454,17 @@ class Script(scripts.Script):
                  - [A;B;C:0,1.2,0,.5] => (A:{1.2,0,0,.25}), (B:{0,1.2,0,.5,1}), (C:{0,1.2,.25,.5})
 
                  - (Example: (5 + (3 * 4 - 2))) => (Example: 15)
+                 - (Example: (int\<4/3\>) => (Example: 1)
+                 - (Example: (curve\<{1,0}\>)) => (Example: \<x\>) where x is a value that follows the edge of the 1st quadrant of the unit circle
+                 - (Example: (curve\<{0,1}\>)) => (Example: \<x\>) where x is a value that follows the edge of the 2nd quadrant of the unit circle
+                 - (Example: (1-curve\<{0,1}\>)) => (Example: \<x\>) where x is a value that follows the edge of the 3rd quadrant of the unit circle
+                 - (Example: (1-curve\<{1,0}\>)) => (Example: \<x\>) where x is a value that follows the edge of the 4th quadrant of the unit circle
+                 - (Example: (curve\<{0,1}, 0.8\>)) => (Example: \<x\>) where x is .2*curve\<{0,1}\> + {0,.8}
+
+                 - cfg: {7,9} => is removed from the prompt and sets the cfg to a value that smoothly goes from 7 to 9 over all frames.
+
                 ### Disclaimer
-                Some LORAs respond very poorly to a value of 0, so there is an option to have them not appear when the weight is 0
+                Some LORAs respond very poorly to a value of 0, so there is a default enabled option to have them not appear when their weight is 0
                 The same is available for parentheses enclosed strings, but that is more for length of prompt and has a significant impact on the consistency between frames
                 
                 ### Img2Img
